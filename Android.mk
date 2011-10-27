@@ -22,7 +22,8 @@ LOCAL_SRC_FILES:=                                      \
                   PanController.cpp                    \
                   SoftapController.cpp                 \
                   UsbController.cpp                    \
-                  ThrottleController.cpp
+                  ThrottleController.cpp               \
+                  RouteController.cpp
 
 LOCAL_MODULE:= netd
 
@@ -39,22 +40,21 @@ ifdef WIFI_DRIVER_FW_AP_PATH
 LOCAL_CFLAGS += -DWIFI_DRIVER_FW_AP_PATH=\"$(WIFI_DRIVER_FW_AP_PATH)\"
 endif
 
-LOCAL_SHARED_LIBRARIES := libsysutils libcutils libnetutils libcrypto
-
 ifdef BOARD_WLAN_ATHEROS_SDK
-LOCAL_SHARED_LIBRARIES += libhostapd_client
-LOCAL_CFLAGS += -DATH_SDK
+LOCAL_CFLAGS += -I$(BOARD_WLAN_ATHEROS_SDK)/include
+LOCAL_CFLAGS += -I$(BOARD_WLAN_ATHEROS_SDK)/host/include
+LOCAL_CFLAGS += -I$(BOARD_WLAN_ATHEROS_SDK)/host/os/linux/include
+LOCAL_CFLAGS += -I$(BOARD_WLAN_ATHEROS_SDK)/host/wlan/include
+LOCAL_CFLAGS += -DATH_WIFI
+LOCAL_STATIC_LIBRARIES := libhostapd_client
 endif
+
+LOCAL_SHARED_LIBRARIES := libsysutils libcutils libnetutils libcrypto
 
 ifeq ($(BOARD_HAVE_BLUETOOTH),true)
   LOCAL_SHARED_LIBRARIES := $(LOCAL_SHARED_LIBRARIES) libbluedroid
   LOCAL_CFLAGS := $(LOCAL_CFLAGS) -DHAVE_BLUETOOTH
 endif
-
-ifneq (, $(filter a1 a3 a4, $(TARGET_DEVICE)))
-  LOCAL_CFLAGS += -DENABLE_OLDSTYLE_USB
-endif
-
 
 include $(BUILD_EXECUTABLE)
 

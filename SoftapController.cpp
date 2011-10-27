@@ -31,18 +31,23 @@
 #include <openssl/evp.h>
 #include <openssl/sha.h>
 
-
-#define LOG_NDEBUG 3
-
-
 #define LOG_TAG "SoftapController"
 #include <cutils/log.h>
 
 #include "SoftapController.h"
 
-#ifdef ATH_SDK
+#ifdef ATH_WIFI
+#include <athdefs.h>
+#include <a_types.h>
+#include <a_osapi.h>
+#include <wmi.h>
+#include <athdrv_linux.h>
+#include <athtypes_linux.h>
+#include <ieee80211.h>
+#include <ieee80211_ioctl.h>
 
-extern void apNotifyInterfaceChanged(const char *name, bool isUp);
+#include "NetlinkManager.h"
+#include "ResponseCode.h"
 
 #include "private/android_filesystem_config.h"
 #include "cutils/properties.h"
@@ -53,7 +58,7 @@ extern void apNotifyInterfaceChanged(const char *name, bool isUp);
 #include <sys/_system_properties.h>
 #include "libhostapd_client/wpa_ctrl.h"
 
-static const char IFACE_DIR[]           = "/data/system/hostapd";
+static const char IFACE_DIR[]           = "/dev/socket/hostapd_";
 static const char HOSTAPD_NAME[]     = "hostapd";
 static const char HOSTAPD_CONFIG_TEMPLATE[]= "/system/etc/wifi/hostapd.conf";
 static const char HOSTAPD_CONFIG_FILE[]    = "/data/misc/wifi/hostapd.conf";
@@ -62,13 +67,55 @@ static const char HOSTAPD_PROP_NAME[]      = "init.svc.hostapd";
 #define WIFI_TEST_INTERFACE     "sta"
 #define WIFI_DEFAULT_BI         100         /* in TU */
 #define WIFI_DEFAULT_DTIM       1           /* in beacon */
-#define WIFI_DEFAULT_CHANNEL    6
-#define WIFI_DEFAULT_MAX_STA    8
-#define WIFI_DEFAULT_PREAMBLE   0
+#define WIFI_DEFAULT_CHANNEL    6           
+#define WIFI_DEFAULT_MAX_STA    8           
+#define WIFI_DEFAULT_PREAMBLE   0           
+#define WIFI_AP_INTERFACE       "wlan0"
 
-static struct wpa_ctrl *ctrl_conn;
-static char iface[PROPERTY_VALUE_MAX];
-int mProfileValid;
+static int if_rename(int sock, const char *oldName, const char *newName)
+{
+    int ret; 
+    int flags;
+    NetlinkManager *nm;
+    struct ifreq ifr;
+    do {
+        memset(&ifr, 0, sizeof(ifr));
+        strncpy(ifr.ifr_name, oldName, IFNAMSIZ);
+    	if ((ret=ioctl(sock, SIOCGIFFLAGS, (caddr_t)&ifr)) <0) {
+            break;
+        }
+        flags = (ifr.ifr_flags & 0xffff);
+        memset(&ifr, 0, sizeof(ifr));
+        strncpy(ifr.ifr_name, oldName, IFNAMSIZ);
+        ifr.ifr_flags = (flags & ~IFF_UP);
+	if ((ret=ioctl(sock, SIOCSIFFLAGS, (caddr_t)&ifr))<0) {
+            break;
+        }
+        memset(&ifr, 0, sizeof(ifr));
+        strncpy(ifr.ifr_name, oldName, IFNAMSIZ);
+        strncpy(ifr.ifr_newname, newName, IFNAMSIZ);
+        if ((ret = ioctl(sock, SIOCSIFNAME, &ifr)) < 0) {
+            break;
+        }
+        memset(&ifr, 0, sizeof(ifr));
+        strncpy(ifr.ifr_name, newName, IFNAMSIZ);
+        ifr.ifr_flags = (flags | IFF_UP);
+        if ((ret=ioctl(sock, SIOCSIFFLAGS, (caddr_t)&ifr))<0) {
+            break;
+        }
+        nm = NetlinkManager::Instance();
+        if (nm) {
+            char msg[255];
+            snprintf(msg, sizeof(msg), "Iface removed %s", oldName);
+            nm->getBroadcaster()->sendBroadcast(ResponseCode::InterfaceChange,
+                                                 msg, false);
+            snprintf(msg, sizeof(msg), "Iface added %s", newName);
+            nm->getBroadcaster()->sendBroadcast(ResponseCode::InterfaceChange,
+                                                 msg, false);
+        }
+    } while (0);
+    return ret;
+}
 
 int ensure_config_file_exists()
 {
@@ -166,6 +213,7 @@ int wifi_start_hostapd()
                 return 0;
             } else if (pi->serial != serial &&
                     strcmp(supp_status, "stopped") == 0) {
+                LOGD("hostapd stoped");
                 return -1;
             }
         }
@@ -177,6 +225,7 @@ int wifi_start_hostapd()
 #endif
         usleep(100000);
     }
+    LOGD("START HOSTAPD FAILED");
     return -1;
 }
 
@@ -204,65 +253,7 @@ int wifi_stop_hostapd()
     return -1;
 }
 
-int wifi_connect_to_hostapd()
-{
-    char ifname[256];
-    char supp_status[PROPERTY_VALUE_MAX] = {'\0'};
-
-    /* Make sure hostapd is running */
-    if (!property_get(HOSTAPD_PROP_NAME, supp_status, NULL)
-            || strcmp(supp_status, "running") != 0) {
-        LOGE("Supplicant not running, cannot connect");
-        return -1;
-    }
-
-#ifdef ATH_SDK
-    /* strncpy(iface, "softap0", sizeof(iface)); */
-    strncpy(iface, "wlap0", sizeof(iface));
-#else
-    property_get("wifi.interface", iface, WIFI_TEST_INTERFACE);
-#endif
-
-    if (access(IFACE_DIR, F_OK) == 0) {
-        snprintf(ifname, sizeof(ifname), "%s/%s", IFACE_DIR, iface);
-    } else {
-        strlcpy(ifname, iface, sizeof(ifname));
-    }
-
-    ctrl_conn = wpa_ctrl_open(ifname);
-    if (ctrl_conn == NULL) {
-        LOGE("Unable to open connection to hostapd on \"%s\": %s",
-             ifname, strerror(errno));
-        return -1;
-    }
-    if (wpa_ctrl_attach(ctrl_conn) != 0) {
-        wpa_ctrl_close(ctrl_conn);
-        ctrl_conn = NULL;
-        return -1;
-    }
-    return 0;
-}
-
-void wifi_close_hostapd_connection()
-{
-    if (ctrl_conn != NULL) {
-        wpa_ctrl_close(ctrl_conn);
-        ctrl_conn = NULL;
-    }
-}
-
-int wifi_load_profile(bool started)
-{
-    if ((started) && (mProfileValid)) {
-        if (ctrl_conn == NULL) {
-            return -1;
-        } else {
-            return wpa_ctrl_reload(ctrl_conn);
-        }
-    }
-    return 0;
-}
-#endif /* ATH_SDK */
+#endif /* ATH_WIFI */
 
 SoftapController::SoftapController() {
     mPid = 0;
@@ -270,10 +261,6 @@ SoftapController::SoftapController() {
     if (mSock < 0)
         LOGE("Failed to open socket");
     memset(mIface, 0, sizeof(mIface));
-#ifdef ATH_SDK
-    mProfileValid = 0;
-    ctrl_conn = NULL;
-#endif /* ATH_SDK */
 }
 
 SoftapController::~SoftapController() {
@@ -314,16 +301,14 @@ int SoftapController::startDriver(char *iface) {
         LOGD("Softap driver start - wrong interface");
         iface = mIface;
     }
-#ifdef ATH_SDK
+
+#ifdef ATH_WIFI 
     /* Before starting the daemon, make sure its config file exists */
-    ret =ensure_config_file_exists();
+    ret = ensure_config_file_exists();
     if (ret < 0) {
         LOGE("Softap driver start - configuration file missing");
         return -1;
     }
-    /* Indicate interface down */
-    apNotifyInterfaceChanged(iface, false);
-    LOGE("Softap is starting ...............\n");
 #else
     fnum = getPrivFuncNum(iface, "START");
     if (fnum < 0) {
@@ -336,7 +321,7 @@ int SoftapController::startDriver(char *iface) {
     wrq.u.data.flags = 0;
     ret = ioctl(mSock, fnum, &wrq);
     usleep(AP_DRIVER_START_DELAY);
-#endif /* ATH_SDK */
+#endif /* ATH_WIFI */
     LOGD("Softap driver start: %d", ret);
     return ret;
 }
@@ -353,7 +338,7 @@ int SoftapController::stopDriver(char *iface) {
         LOGD("Softap driver stop - wrong interface");
         iface = mIface;
     }
-#ifdef ATH_SDK
+#ifdef ATH_WIFI 
     ret = 0;
 #else
     fnum = getPrivFuncNum(iface, "STOP");
@@ -366,14 +351,16 @@ int SoftapController::stopDriver(char *iface) {
     wrq.u.data.pointer = mBuf;
     wrq.u.data.flags = 0;
     ret = ioctl(mSock, fnum, &wrq);
-#endif /* ATH_SDK */
+#endif /* ATH_WIFI */
     LOGD("Softap driver stop: %d", ret);
     return ret;
 }
 
 int SoftapController::startSoftap() {
+#ifndef ATH_WIFI
     struct iwreq wrq;
     pid_t pid = 1;
+#endif
     int fnum, ret = 0;
 
     if (mPid) {
@@ -384,6 +371,18 @@ int SoftapController::startSoftap() {
         LOGE("Softap startap - failed to open socket");
         return -1;
     }
+#ifdef ATH_WIFI 
+
+    if (mIface[0] == '\0') {
+        LOGE("Softap startap - wrong interface");
+        return -1;
+    }
+
+    mPid = 1;
+    usleep(AP_BSS_START_DELAY);
+
+    return ret;
+#else /* ATH_WIFI */
 #if 0
    if ((pid = fork()) < 0) {
         LOGE("fork failed (%s)", strerror(errno));
@@ -395,32 +394,6 @@ int SoftapController::startSoftap() {
         /* start hostapd */
         return ret;
     } else {
-#ifdef ATH_SDK
-        ret = wifi_start_hostapd();
-        if (ret < 0) {
-            LOGE("Softap startap - starting hostapd fails");
-            return -1;
-        }
-
-        sched_yield();
-        usleep(100000);
-
-        ret = wifi_connect_to_hostapd();
-        if (ret < 0) {
-            LOGE("Softap startap - connect to hostapd fails");
-            return -1;
-        }
-
-
-        /* Indicate interface up */
-        apNotifyInterfaceChanged(iface, true);
-
-        ret = wifi_load_profile(true);
-        if (ret < 0) {
-            LOGE("Softap startap - load new configuration fails");
-            return -1;
-        }
-#else
         fnum = getPrivFuncNum(mIface, "AP_BSS_START");
         if (fnum < 0) {
             LOGE("Softap startap - function not supported");
@@ -431,7 +404,6 @@ int SoftapController::startSoftap() {
         wrq.u.data.pointer = mBuf;
         wrq.u.data.flags = 0;
         ret = ioctl(mSock, fnum, &wrq);
-#endif /* ATH_SDK */
         if (ret) {
             LOGE("Softap startap - failed: %d", ret);
         }
@@ -442,10 +414,14 @@ int SoftapController::startSoftap() {
         }
     }
     return ret;
-
+#endif /* ATH_WIFI */
 }
 
 int SoftapController::stopSoftap() {
+#ifdef ATH_WIFI 
+    struct ifreq ifr;
+    char ifname[PROPERTY_VALUE_MAX];
+#endif
     struct iwreq wrq;
     int fnum, ret;
 
@@ -457,9 +433,62 @@ int SoftapController::stopSoftap() {
         LOGE("Softap stopap - failed to open socket");
         return -1;
     }
-#ifdef ATH_SDK
-    wifi_close_hostapd_connection();
+#ifdef ATH_WIFI 
+    if (mIface[0] == '\0') {
+        LOGE("Softap startap - wrong interface");
+        return -1;
+    }
+
     ret = wifi_stop_hostapd();
+
+    if (ret < 0) {
+        LOGE("Softap stopap - stoping hostapd fails");
+        return -1;
+    }
+
+    property_get("wifi.interface", ifname, "wlan0");
+
+    /* Rename AP interface back to station interface name*/
+    if ((ret = if_rename(mSock, WIFI_AP_INTERFACE , ifname)) < 0) {
+        LOGE("Softap stopap - AR6000_IOCTL remove ap interface failed: %d", ret);
+        return -1;
+    }
+
+    /* Stop AP mode in 3 steps */
+
+    /* Step #1: iwconfig mode managed */
+    memset(&wrq, 0, sizeof(wrq));
+    strncpy(wrq.ifr_name, ifname, sizeof(wrq.ifr_name));
+    wrq.u.mode = IW_MODE_INFRA;
+
+    if ((ret = ioctl(mSock, SIOCSIWMODE, &wrq)) < 0) {
+        LOGE("Softap stopap - AR6000_IOCTL failed: %d", ret);
+        return -1;
+    }
+
+    /* Step #2: iwconfig essid abcdefghijklmnopqrstuvwxyz */
+    memset(&wrq, 0, sizeof(wrq));
+    strncpy(wrq.ifr_name, ifname, sizeof(wrq.ifr_name));
+    wrq.u.essid.flags = 1; /* SSID active */
+    strcpy(mBuf, "abcdefghijklmnopqrstuvwxyz");    
+    wrq.u.essid.pointer = (caddr_t *)mBuf;
+    wrq.u.essid.length = strlen(mBuf); 
+    if ((ret = ioctl(mSock, SIOCSIWESSID, &wrq)) < 0) {
+        LOGE("Softap stopap - AR6000_IOCTL failed: %d", ret);
+        return -1;
+    }
+
+    /* Step #3: iwconfig essid off */
+    mBuf[0] = '\0';
+    wrq.u.essid.flags = 0; /* SSID active */
+    wrq.u.essid.pointer = (caddr_t *)mBuf;
+    wrq.u.essid.length = 0; /* Put some length */
+    if ((ret = ioctl(mSock, SIOCSIWESSID, &wrq)) < 0) {
+        LOGE("Softap stopap - AR6000_IOCTL failed: %d", ret);
+        return -1;
+    }  
+
+    memset(mIface, 0, sizeof(mIface));
 #else
     fnum = getPrivFuncNum(mIface, "AP_BSS_STOP");
     if (fnum < 0) {
@@ -476,7 +505,7 @@ int SoftapController::stopSoftap() {
     kill(mPid, SIGTERM);
     waitpid(mPid, NULL, 0);
 #endif
-#endif /* ATH_SDK */
+#endif /* ATH_WIFI */
     mPid = 0;
     LOGD("Softap service stopped: %d", ret);
     usleep(AP_BSS_STOP_DELAY);
@@ -511,16 +540,17 @@ int SoftapController::addParam(int pos, const char *cmd, const char *arg)
  *	argv[9] - Max SCB
  */
 int SoftapController::setSoftap(int argc, char *argv[]) {
+#ifdef ATH_WIFI 
+    int fd;
+    char buf[1024];
+    int len;
+#else
     unsigned char psk[SHA256_DIGEST_LENGTH];
     char psk_str[2*SHA256_DIGEST_LENGTH+1];
     struct iwreq wrq;
+#endif /* ATH_WIFI */
     int fnum, ret, i = 0;
     char *ssid;
-#ifdef ATH_SDK
-    int fd;
-    char buf[80];
-    int len;
-#endif
 
     if (mSock < 0) {
         LOGE("Softap set - failed to open socket");
@@ -531,17 +561,17 @@ int SoftapController::setSoftap(int argc, char *argv[]) {
         return -1;
     }
 
-#ifdef ATH_SDK
+#ifdef ATH_WIFI 
     ret = 0;
-
+    strncpy(mIface, argv[3], sizeof(mIface));    
     fd = open(HOSTAPD_CONFIG_FILE, O_CREAT|O_WRONLY|O_TRUNC, 0660);
     if (fd < 0) {
         LOGE("Cannot create \"%s\": %s", HOSTAPD_CONFIG_FILE, strerror(errno));
         return -1;
     }
-    len = snprintf(buf, sizeof(buf), "interface=%s\n",argv[3]);
+    len = snprintf(buf, sizeof(buf), "interface=%s\n", mIface);
     write(fd, buf, len);
-    len = snprintf(buf, sizeof(buf), "ctrl_interface=%s\n",IFACE_DIR);
+    len = snprintf(buf, sizeof(buf), "ctrl_interface=%s\n", mIface);
     write(fd, buf, len);
     if (argc > 4) {
         len = snprintf(buf, sizeof(buf), "ssid=%s\n",argv[4]);
@@ -552,8 +582,14 @@ int SoftapController::setSoftap(int argc, char *argv[]) {
     write(fd, buf, len);
     len = snprintf(buf, sizeof(buf), "auth_algs=1\n");
     write(fd, buf, len);
-    len = snprintf(buf, sizeof(buf), "max_num_sta=%d\n",WIFI_DEFAULT_MAX_STA);
-    write(fd, buf, len);
+    {
+        int max_sta = (argc > 9) ? atoi(argv[9]) : WIFI_DEFAULT_MAX_STA;
+        if (max_sta < 1 || max_sta >WIFI_DEFAULT_MAX_STA) {
+            max_sta = WIFI_DEFAULT_MAX_STA;
+        }
+        len = snprintf(buf, sizeof(buf), "max_num_sta=%d\n", max_sta);
+        write(fd, buf, len);
+    }
     len = snprintf(buf, sizeof(buf), "beacon_int=%d\n",WIFI_DEFAULT_BI);
     write(fd, buf, len);
     len = snprintf(buf, sizeof(buf), "dtim_period=%d\n",WIFI_DEFAULT_DTIM);
@@ -589,14 +625,52 @@ int SoftapController::setSoftap(int argc, char *argv[]) {
         len = snprintf(buf, sizeof(buf), "preamble=%d\n",WIFI_DEFAULT_PREAMBLE);
         write(fd, buf, len);
     }
-    mProfileValid = 1;
 
     close(fd);
 
-    ret = wifi_load_profile(isSoftapStarted());
-    if (ret < 0) {
-        LOGE("Softap set - load new configuration fails");
-        return -1;
+    if (isSoftapStarted()) {
+        /* Restart hostapd */
+        ret = wifi_stop_hostapd();
+        if (ret < 0) {
+            LOGE("Softap Softap set - stoping hostapd fails");
+            return -1;
+        }
+
+        ret = wifi_start_hostapd();
+        if (ret < 0) {
+            LOGE("Softap Softap set - starting hostapd fails");
+            return -1;
+        }
+    } else {
+        struct ifreq ifr;
+        char ifname[256];
+
+        memset(&ifr, 0, sizeof(ifr));
+        strncpy(ifr.ifr_name, argv[2], sizeof(ifr.ifr_name));
+
+        /* Enable WLAN */
+        ((int *)mBuf)[0] = AR6000_XIOCTRL_WMI_SET_WLAN_STATE;
+        ((int *)mBuf)[1] = 1;
+        ifr.ifr_data = mBuf;
+        if ((ret = ioctl(mSock, AR6000_IOCTL_EXTENDED, &ifr)) < 0) {
+            LOGE("AR6000_IOCTL %s set wlan state failed: %d:%s", ifr.ifr_name, ret, strerror(errno));
+            return ret;
+        }
+
+        /* Add AP interface */
+        if ((ret = if_rename(mSock, ifr.ifr_name, WIFI_AP_INTERFACE)) < 0) {
+            LOGE("Softap startap - AR6000_IOCTL %s addif %s failed: %d", ifr.ifr_name, mIface, ret);
+            return ret;
+        }
+        
+        ret = wifi_start_hostapd();
+        if (ret < 0) {
+            LOGE("Softap startap - starting hostapd fails");
+            return -1;
+        }
+
+        sched_yield();
+        usleep(100000);
     }
 #else
     fnum = getPrivFuncNum(argv[2], "AP_SET_CFG");
@@ -661,7 +735,7 @@ int SoftapController::setSoftap(int argc, char *argv[]) {
     wrq.u.data.flags = 0;
     /* system("iwpriv eth0 WL_AP_CFG ASCII_CMD=AP_CFG,SSID=\"AndroidAP\",SEC=\"open\",KEY=12345,CHANNEL=1,PREAMBLE=0,MAX_SCB=8,END"); */
     ret = ioctl(mSock, fnum, &wrq);
-#endif /* ATH_SDK */
+#endif /* ATH_WIFI */
     if (ret) {
         LOGE("Softap set - failed: %d", ret);
     }
@@ -692,7 +766,9 @@ int SoftapController::fwReloadSoftap(int argc, char *argv[])
         return -1;
     }
 
-#ifdef ATH_SDK
+    LOGD("fwReloadSoftap: argv[2]:%s argv[3]:%s", argv[2], argv[3]);
+    
+#ifdef ATH_WIFI 
     ret = 0;
 #else
     iface = argv[2];
@@ -716,7 +792,7 @@ int SoftapController::fwReloadSoftap(int argc, char *argv[])
     wrq.u.data.pointer = mBuf;
     wrq.u.data.flags = 0;
     ret = ioctl(mSock, fnum, &wrq);
-#endif /* ATH_SDK */
+#endif /* ATH_WIFI */
     if (ret) {
         LOGE("Softap fwReload - failed: %d", ret);
     }
