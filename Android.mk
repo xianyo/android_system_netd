@@ -17,6 +17,7 @@ LOCAL_SRC_FILES:=                                      \
                   SoftapController.cpp                 \
                   TetherController.cpp                 \
                   ThrottleController.cpp               \
+		  RouteController.cpp                  \
                   logwrapper.c                         \
                   main.cpp                             \
 
@@ -38,6 +39,15 @@ LOCAL_SHARED_LIBRARIES := libstlport libsysutils libcutils libnetutils \
 
 ifneq ($(BOARD_HOSTAPD_DRIVER),)
   LOCAL_CFLAGS += -DHAVE_HOSTAPD
+endif
+
+ifdef BOARD_WLAN_ATHEROS_SDK
+LOCAL_CFLAGS += -I$(BOARD_WLAN_ATHEROS_SDK)/include
+LOCAL_CFLAGS += -I$(BOARD_WLAN_ATHEROS_SDK)/host/include
+LOCAL_CFLAGS += -I$(BOARD_WLAN_ATHEROS_SDK)/host/os/linux/include
+LOCAL_CFLAGS += -I$(BOARD_WLAN_ATHEROS_SDK)/host/wlan/include
+LOCAL_CFLAGS += -DATH_WIFI
+LOCAL_STATIC_LIBRARIES := libhostapd_client
 endif
 
 ifeq ($(BOARD_HAVE_BLUETOOTH),true)
