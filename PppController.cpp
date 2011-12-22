@@ -30,9 +30,11 @@
 
 #define LOG_TAG "PppController"
 #include <cutils/log.h>
-
+#include <cutils/properties.h>
 #include "PppController.h"
 
+#define SERVICE_PPPD_PPPOE "pppd_pppoe"
+#define PROPERTY_PPPD_PPPOE_EXIT_CODE "net.pppoe.ppp-exit"
 extern "C" int logwrap(int argc, const char **argv, int background);
 
 PppController::PppController() {
@@ -116,6 +118,67 @@ int PppController::detachPppd(const char *tty) {
     mPid = 0;
     LOGD("PPPD services on port %s stopped", tty);
     return 0;
+}
+
+int PppController::startPppd_pppoe(const char *username, const char *password) {
+
+	LOGW("username=%s, password=%s", username, password);
+//	int err;	
+//	err = property_set("ctl.start", SERVICE_PPPD_PPPOE);
+
+	property_set(PROPERTY_PPPD_PPPOE_EXIT_CODE, "");
+    pid_t pid;
+
+    if (mPid) {
+        LOGE("Multiple PPPD instances not currently supported");
+        errno = EBUSY;
+        return -1;
+    }
+
+    if ((pid = fork()) < 0) {
+        LOGE("fork failed (%s)", strerror(errno));
+        return -1;
+    }
+
+    if (!pid) {
+		setsid();
+        if (execl("/system/bin/pppd", "/system/bin/pppd", "plugin", "rp-pppoe.so", "eth0", "-detach",
+                  "user", username, "password", password, "defaultroute", "usepeerdns", "linkname", "ppp0",
+				  (char *) NULL)) {
+            LOGE("execl failed (%s)", strerror(errno));
+        }
+
+        LOGE("Should never get here!");
+        return 0;
+    } else {
+        LOGW("mPid %d",pid);
+        mPid = pid;
+    }
+	return 0;
+}
+
+int PppController::stopPppd_pppoe() {
+
+	
+//	property_set("ctl.stop", SERVICE_PPPD_PPPOE);
+	int result=0;
+	char buf[10];
+	if (mPid == 0) {
+        LOGE("PPPD already stopped");
+        return 0;
+    }
+
+    LOGD("Stopping PPPD pppoe services on port mPid %d", mPid);
+    kill(mPid, SIGTERM);
+    waitpid(mPid, &result, 0);
+
+	sprintf(buf,"%d",WEXITSTATUS(result));
+	property_set(PROPERTY_PPPD_PPPOE_EXIT_CODE, buf);
+
+    mPid = 0;
+    LOGD("PPPD pppoe services stopped %d",result);
+
+	return 0;
 }
 
 TtyCollection *PppController::getTtyList() {

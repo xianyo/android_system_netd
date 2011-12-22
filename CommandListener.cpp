@@ -509,7 +509,7 @@ int CommandListener::PppdCmd::runCommand(SocketClient *cli,
                                                       int argc, char **argv) {
     int rc = 0;
 
-    if (argc < 3) {
+    if (argc < 2) {
         cli->sendMsg(ResponseCode::CommandSyntaxError, "Missing argument", false);
         return 0;
     }
@@ -539,6 +539,10 @@ int CommandListener::PppdCmd::runCommand(SocketClient *cli,
         rc = sPppCtrl->attachPppd(argv[2], l, r, dns1, dns2);
     } else if (!strcmp(argv[1], "detach")) {
         rc = sPppCtrl->detachPppd(argv[2]);
+	} else if (!strcmp(argv[1], "start_pppoe")) {
+        rc = sPppCtrl->startPppd_pppoe(argv[2],argv[3]);
+	} else if (!strcmp(argv[1], "stop_pppoe")) {
+        rc = sPppCtrl->stopPppd_pppoe();
     } else {
         cli->sendMsg(ResponseCode::CommandSyntaxError, "Unknown pppd cmd", false);
         return 0;

@@ -32,6 +32,7 @@
 
 #include "CommandListener.h"
 #include "NetlinkManager.h"
+#include "DnsProxyListener.h"
 
 static void coldboot(const char *path);
 static void sigchld_handler(int sig);
@@ -40,6 +41,7 @@ int main() {
 
     CommandListener *cl;
     NetlinkManager *nm;
+    DnsProxyListener *dpl;
 
     LOGI("Netd 1.0 starting");
 
@@ -59,6 +61,8 @@ int main() {
         exit(1);
     }
 
+    // Set local DNS mode, to prevent bionic from proxying
+    // back to this service, recursively.
     /*
      * Now that we're up, we can respond to commands
      */
