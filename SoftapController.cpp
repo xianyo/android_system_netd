@@ -70,7 +70,7 @@ static const char HOSTAPD_PROP_NAME[]      = "init.svc.hostapd";
 #define WIFI_DEFAULT_CHANNEL    6           
 #define WIFI_DEFAULT_MAX_STA    8           
 #define WIFI_DEFAULT_PREAMBLE   0           
-#define WIFI_AP_INTERFACE       "wlan0"
+#define WIFI_AP_INTERFACE       "wlap0"
 
 static int if_rename(int sock, const char *oldName, const char *newName)
 {
@@ -646,7 +646,7 @@ int SoftapController::setSoftap(int argc, char *argv[]) {
         char ifname[256];
 
         memset(&ifr, 0, sizeof(ifr));
-        strncpy(ifr.ifr_name, argv[2], sizeof(ifr.ifr_name));
+        strncpy(ifr.ifr_name, argv[3], sizeof(ifr.ifr_name));
 
         /* Enable WLAN */
         ((int *)mBuf)[0] = AR6000_XIOCTRL_WMI_SET_WLAN_STATE;
