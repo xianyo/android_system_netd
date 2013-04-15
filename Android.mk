@@ -21,10 +21,15 @@ LOCAL_SRC_FILES:=                                      \
                   NatController.cpp                    \
                   PppController.cpp                    \
                   PanController.cpp                    \
-                  SoftapController.cpp                 \
                   UsbController.cpp                    \
                   ThrottleController.cpp               \
                   RouteController.cpp
+
+ifeq ($(BOARD_USES_REALTEK_WIFI), true)
+    LOCAL_SRC_FILES += SoftapController_realtek.cpp
+else
+    LOCAL_SRC_FILES += SoftapController.cpp
+endif
 
 LOCAL_MODULE:= netd
 
@@ -51,6 +56,10 @@ LOCAL_STATIC_LIBRARIES := libhostapd_client
 endif
 
 LOCAL_SHARED_LIBRARIES := libsysutils libcutils libnetutils libcrypto
+
+ifeq ($(BOARD_USES_REALTEK_WIFI), true)
+    LOCAL_SHARED_LIBRARIES += libhardware_legacy
+endif
 
 ifeq ($(BOARD_HAVE_BLUETOOTH),true)
   LOCAL_SHARED_LIBRARIES := $(LOCAL_SHARED_LIBRARIES) libbluedroid
